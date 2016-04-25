@@ -95,7 +95,6 @@ bool LaserLoopClosure::LoadParameters(const ros::NodeHandle& n) {
   if (!pu::Get("skip_recent_poses", skip_recent_poses_)) return false;
 
   // Load ICP parameters.
-  if (!pu::Get("icp/ransac_thresh", icp_ransac_thresh_)) return false;
   if (!pu::Get("icp/tf_epsilon", icp_tf_epsilon_)) return false;
   if (!pu::Get("icp/corr_dist", icp_corr_dist_)) return false;
   if (!pu::Get("icp/iterations", icp_iterations_)) return false;
@@ -344,7 +343,6 @@ bool LaserLoopClosure::PerformICP(const LaserLoopClosure::PointCloud& scan1,
 
   // Set up ICP.
   pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
-  icp.setRANSACOutlierRejectionThreshold(icp_ransac_thresh_);
   icp.setTransformationEpsilon(icp_tf_epsilon_);
   icp.setMaxCorrespondenceDistance(icp_corr_dist_);
   icp.setMaximumIterations(icp_iterations_);
