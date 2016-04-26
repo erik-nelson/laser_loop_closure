@@ -163,6 +163,9 @@ bool LaserLoopClosure::RegisterCallbacks(const ros::NodeHandle& n) {
   graph_node_pub_ =
       nl.advertise<visualization_msgs::Marker>("graph_nodes", 10, false);
 
+  scan1_pub_ = nl.advertise<PointCloud>("loop_closure_scan1", 10, false);
+  scan2_pub_ = nl.advertise<PointCloud>("loop_closure_scan2", 10, false);
+
   return true;
 }
 
@@ -222,13 +225,13 @@ bool LaserLoopClosure::FindLoopClosures(
   closure_keys->clear();
 
   // Get pose and scan for the provided key.
-  const gu::Transform3 pose1 = ToGu(values_.at<Pose3>(key-1));
+  // const gu::Transform3 pose1 = ToGu(values_.at<Pose3>(key-1));
+  const gu::Transform3 pose1 = ToGu(values_.at<Pose3>(key));
   const LaserLoopClosure::PointCloud scan1 = keyed_scans_[key];
 
   // Iterate through past poses and find those that lie close to the most
   // recently added one.
   bool closed_loop = false;
-  NonlinearFactorGraph new_factors;
   for (const auto& keyed_pose : values_) {
     const unsigned int other_key = keyed_pose.key;
 
@@ -253,9 +256,12 @@ bool LaserLoopClosure::FindLoopClosures(
 
       gu::Transform3 delta;
       LaserLoopClosure::Mat66 covariance;
-      if (PerformICP(scan1, scan2, &delta, &covariance)) {
+      if (PerformICP(scan1, scan2, pose1, pose2, &delta, &covariance)) {
         // We found a loop closure. Add it to the pose graph.
-        new_factors.add(BetweenFactor<Pose3>(key, other_key, ToGtsam(delta), ToGtsam(covariance)));
+        NonlinearFactorGraph new_factor;
+        new_factor.add(BetweenFactor<Pose3>(key, other_key, ToGtsam(delta),
+                                            ToGtsam(covariance)));
+        isam_->update(new_factor, Values());
         closed_loop = true;
 
         // Store for visualization and output.
@@ -264,7 +270,6 @@ bool LaserLoopClosure::FindLoopClosures(
       }
     }
   }
-  isam_->update(new_factors, Values());
   values_ = isam_->calculateEstimate();
 
   return closed_loop;
@@ -280,6 +285,7 @@ gu::Transform3 LaserLoopClosure::ToGu(const Pose3& pose) const {
     for (int j = 0; j < 3; ++j)
       out.rotation(i, j) = pose.rotation().matrix()(i, j);
   }
+
   return out;
 }
 
@@ -334,6 +340,8 @@ BetweenFactor<Pose3> LaserLoopClosure::MakeBetweenFactor(
 
 bool LaserLoopClosure::PerformICP(const LaserLoopClosure::PointCloud& scan1,
                                   const LaserLoopClosure::PointCloud& scan2,
+                                  const gu::Transform3& pose1,
+                                  const gu::Transform3& pose2,
                                   gu::Transform3* delta,
                                   LaserLoopClosure::Mat66* covariance) {
   if (delta == NULL || covariance == NULL) {
@@ -346,16 +354,34 @@ bool LaserLoopClosure::PerformICP(const LaserLoopClosure::PointCloud& scan1,
   icp.setTransformationEpsilon(icp_tf_epsilon_);
   icp.setMaxCorrespondenceDistance(icp_corr_dist_);
   icp.setMaximumIterations(icp_iterations_);
+  icp.setRANSACIterations(0);
 
-  // Set target point cloud.
-  PointCloud::Ptr target(new PointCloud);
-  pcl::copyPointCloud(scan1, *target);
-  icp.setInputSource(target);
+  // Set source point cloud. Transform it to pose 2 frame to get a delta.
+  const Eigen::Matrix<double, 3, 3> R1 = pose1.rotation.Eigen();
+  const Eigen::Matrix<double, 3, 1> t1 = pose1.translation.Eigen();
+  Eigen::Matrix4d body1_to_world;
+  body1_to_world.block(0, 0, 3, 3) = R1;
+  body1_to_world.block(0, 3, 3, 1) = t1;
 
-  // Set source point cloud.
+  const Eigen::Matrix<double, 3, 3> R2 = pose2.rotation.Eigen();
+  const Eigen::Matrix<double, 3, 1> t2 = pose2.translation.Eigen();
+  Eigen::Matrix4d body2_to_world;
+  body2_to_world.block(0, 0, 3, 3) = R2;
+  body2_to_world.block(0, 3, 3, 1) = t2;
+
+  gu::Transform3 delta_prior = gu::PoseDelta(pose1, pose2);
+  Eigen::Matrix4d delta_eigen;
+  delta_eigen.block(0, 0, 3, 3) = delta_prior.rotation.Eigen();
+  delta_eigen.block(0, 3, 3, 1) = delta_prior.translation.Eigen();
+
   PointCloud::Ptr source(new PointCloud);
-  pcl::copyPointCloud(scan2, *source);
-  icp.setInputTarget(source);
+  pcl::transformPointCloud(scan1, *source, body1_to_world);
+  icp.setInputSource(source);
+
+  // Set target point cloud in its own frame.
+  PointCloud::Ptr target(new PointCloud);
+  pcl::transformPointCloud(scan2, *target, body2_to_world);
+  icp.setInputTarget(target);
 
   // Perform ICP.
   LaserLoopClosure::PointCloud unused_result;
@@ -363,26 +389,38 @@ bool LaserLoopClosure::PerformICP(const LaserLoopClosure::PointCloud& scan1,
 
   // Get resulting transform.
   const Eigen::Matrix4f T = icp.getFinalTransformation();
-  gu::Transform3 Tgu;
-  Tgu.translation = gu::Vec3(T(0, 3), T(1, 3), T(2, 3));
-  Tgu.rotation = gu::Rot3(T(0, 0), T(0, 1), T(0, 2),
-                          T(1, 0), T(1, 1), T(1, 2),
-                          T(2, 0), T(2, 1), T(2, 2));
+  gu::Transform3 delta_icp;
+  delta_icp.translation = gu::Vec3(T(0, 3), T(1, 3), T(2, 3));
+  delta_icp.rotation = gu::Rot3(T(0, 0), T(0, 1), T(0, 2),
+                                T(1, 0), T(1, 1), T(1, 2),
+                                T(2, 0), T(2, 1), T(2, 2));
 
   // Is the transform good?
-  if (icp.hasConverged() && icp.getFitnessScore() > max_tolerable_fitness_) {
+  if (!icp.hasConverged())
+    return false;
+
+  if (icp.getFitnessScore() > max_tolerable_fitness_) {
     return false;
   }
 
-  // Assign output.
-  *delta = Tgu;
+  // Update the pose-to-pose odometry estimate using the output of ICP.
+  const gu::Transform3 update =
+      gu::PoseUpdate(gu::PoseInverse(pose1),
+                     gu::PoseUpdate(gu::PoseInverse(delta_icp), pose1));
+  *delta = gu::PoseUpdate(update, delta_prior);
 
   // TODO: Use real ICP covariance.
   covariance->Zeros();
   for (int i = 0; i < 3; ++i)
-    (*covariance)(i, i) = 0.2;
+    (*covariance)(i, i) = 0.01;
   for (int i = 3; i < 6; ++i)
-    (*covariance)(i, i) = 0.05;
+    (*covariance)(i, i) = 0.01;
+
+  // If the loop closure was a success, publish the two scans.
+  source->header.frame_id = fixed_frame_id_;
+  target->header.frame_id = fixed_frame_id_;
+  scan1_pub_.publish(*source);
+  scan2_pub_.publish(*target);
 
   return true;
 }
@@ -400,7 +438,7 @@ void LaserLoopClosure::PublishPoseGraph() const {
     m.color.r = 0.0;
     m.color.g = 1.0;
     m.color.b = 0.0;
-    m.color.a = 1.0;
+    m.color.a = 0.8;
     m.scale.x = 0.02;
 
     for (size_t ii = 0; ii < odometry_edges_.size(); ++ii) {
@@ -427,7 +465,7 @@ void LaserLoopClosure::PublishPoseGraph() const {
     m.color.r = 1.0;
     m.color.g = 0.0;
     m.color.b = 0.0;
-    m.color.a = 1.0;
+    m.color.a = 0.8;
     m.scale.x = 0.02;
 
     for (size_t ii = 0; ii < loop_edges_.size(); ++ii) {
@@ -454,7 +492,7 @@ void LaserLoopClosure::PublishPoseGraph() const {
     m.color.r = 0.3;
     m.color.g = 0.0;
     m.color.b = 0.8;
-    m.color.a = 1.0;
+    m.color.a = 0.8;
     m.scale.x = 0.1;
     m.scale.y = 0.1;
     m.scale.z = 0.1;

@@ -111,6 +111,8 @@ class LaserLoopClosure {
 
   // Perform ICP between two laser scans.
   bool PerformICP(const PointCloud& scan1, const PointCloud& scan2,
+                  const geometry_utils::Transform3& pose1,
+                  const geometry_utils::Transform3& pose2,
                   geometry_utils::Transform3* delta, Mat66* covariance);
 
   // Node name.
@@ -145,6 +147,8 @@ class LaserLoopClosure {
   ros::Publisher odometry_edge_pub_;
   ros::Publisher loop_edge_pub_;
   ros::Publisher graph_node_pub_;
+  ros::Publisher scan1_pub_;
+  ros::Publisher scan2_pub_;
 
   typedef std::pair<unsigned int, unsigned int> Edge;
   std::vector<Edge> odometry_edges_;
