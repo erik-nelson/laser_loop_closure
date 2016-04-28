@@ -40,6 +40,7 @@
 #include <ros/ros.h>
 #include <geometry_utils/Matrix3x3.h>
 #include <geometry_utils/Transform3.h>
+#include <point_cloud_filter/PointCloudFilter.h>
 
 #include <gtsam/base/Vector.h>
 #include <gtsam/geometry/Pose3.h>
@@ -78,12 +79,19 @@ class LaserLoopClosure {
 
   // Upon successful addition of a new between factor, call this function to
   // associate a laser scan with the new pose.
-  bool AddKeyScanPair(unsigned int key, const PointCloud& scan);
+  bool AddKeyScanPair(unsigned int key, const PointCloud::ConstPtr& scan);
 
   // After receiving an output key from 'AddBetweenFactor', call this to check
   // for loop closures with other poses in the pose graph.
   bool FindLoopClosures(unsigned int key,
                         std::vector<unsigned int>* closure_keys);
+
+  // Build a 3D point cloud by concatenating all point clouds from poses along
+  // the pose graph.
+  void GetMaximumLikelihoodPoints(PointCloud* map);
+
+  // Get the most recent pose in the pose graph.
+  geometry_utils::Transform3 GetLastPose() const;
 
   // Publish pose graph for visualization.
   void PublishPoseGraph() const;
@@ -110,7 +118,8 @@ class LaserLoopClosure {
       const gtsam::Pose3& pose, const Gaussian::shared_ptr& covariance);
 
   // Perform ICP between two laser scans.
-  bool PerformICP(const PointCloud& scan1, const PointCloud& scan2,
+  bool PerformICP(const PointCloud::ConstPtr& scan1,
+                  const PointCloud::ConstPtr& scan2,
                   const geometry_utils::Transform3& pose1,
                   const geometry_utils::Transform3& pose2,
                   geometry_utils::Transform3* delta, Mat66* covariance);
@@ -119,15 +128,17 @@ class LaserLoopClosure {
   std::string name_;
 
   // Keep a list of keyed laser scans.
-  std::map<unsigned int, PointCloud> keyed_scans_;
+  std::map<unsigned int, PointCloud::ConstPtr> keyed_scans_;
 
   // Aggregate odometry until we can update the pose graph.
   gtsam::Pose3 odometry_;
 
   // Pose graph and ISAM2 parameters.
   unsigned int key_;
+  unsigned int last_closure_key_;
   unsigned int relinearize_interval_;
   unsigned int skip_recent_poses_;
+  unsigned int poses_before_reclosing_;
   double translation_threshold_;
   double proximity_threshold_;
   double max_tolerable_fitness_;
@@ -144,9 +155,11 @@ class LaserLoopClosure {
 
   // Publishers and visualization containers.
   std::string fixed_frame_id_;
+  std::string base_frame_id_;
   ros::Publisher odometry_edge_pub_;
   ros::Publisher loop_edge_pub_;
   ros::Publisher graph_node_pub_;
+  ros::Publisher closure_area_pub_;
   ros::Publisher scan1_pub_;
   ros::Publisher scan2_pub_;
 
@@ -154,6 +167,8 @@ class LaserLoopClosure {
   std::vector<Edge> odometry_edges_;
   std::vector<Edge> loop_edges_;
 
+  // For filtering laser scans prior to ICP.
+  PointCloudFilter filter_;
 };
 
 #endif

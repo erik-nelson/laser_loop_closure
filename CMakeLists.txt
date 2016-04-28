@@ -15,6 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   geometry_utils
   parameter_utils
+  point_cloud_filter
   visualization_msgs
   pcl_ros
 )
@@ -26,6 +27,7 @@ catkin_package(
     roscpp
     geometry_utils
     parameter_utils
+    point_cloud_filter
     visualization_msgs
     pcl_ros
   DEPENDS

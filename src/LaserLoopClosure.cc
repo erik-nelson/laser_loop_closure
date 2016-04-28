@@ -57,12 +57,18 @@ using gtsam::Values;
 using gtsam::Vector3;
 using gtsam::Vector6;
 
-LaserLoopClosure::LaserLoopClosure() : key_(1) {}
+LaserLoopClosure::LaserLoopClosure()
+    : key_(1), last_closure_key_(std::numeric_limits<int>::min()) {}
 
 LaserLoopClosure::~LaserLoopClosure() {}
 
 bool LaserLoopClosure::Initialize(const ros::NodeHandle& n) {
   name_ = ros::names::append(n.getNamespace(), "LaserLoopClosure");
+
+  if (!filter_.Initialize(n)) {
+    ROS_ERROR("%s: Failed to initialize point cloud filter.", name_.c_str());
+    return false;
+  }
 
   if (!LoadParameters(n)) {
     ROS_ERROR("%s: Failed to load parameters.", name_.c_str());
@@ -81,6 +87,7 @@ bool LaserLoopClosure::LoadParameters(const ros::NodeHandle& n) {
 
   // Load frame ids.
   if (!pu::Get("frame_id/fixed", fixed_frame_id_)) return false;
+  if (!pu::Get("frame_id/base", base_frame_id_)) return false;
 
   // Load ISAM2 parameters.
   unsigned int relinearize_skip = 1;
@@ -93,6 +100,7 @@ bool LaserLoopClosure::LoadParameters(const ros::NodeHandle& n) {
   if (!pu::Get("proximity_threshold", proximity_threshold_)) return false;
   if (!pu::Get("max_tolerable_fitness", max_tolerable_fitness_)) return false;
   if (!pu::Get("skip_recent_poses", skip_recent_poses_)) return false;
+  if (!pu::Get("poses_before_reclosing", poses_before_reclosing_)) return false;
 
   // Load ICP parameters.
   if (!pu::Get("icp/tf_epsilon", icp_tf_epsilon_)) return false;
@@ -162,6 +170,8 @@ bool LaserLoopClosure::RegisterCallbacks(const ros::NodeHandle& n) {
       nl.advertise<visualization_msgs::Marker>("loop_edges", 10, false);
   graph_node_pub_ =
       nl.advertise<visualization_msgs::Marker>("graph_nodes", 10, false);
+  closure_area_pub_ =
+      nl.advertise<visualization_msgs::Marker>("closure_area", 10, false);
 
   scan1_pub_ = nl.advertise<PointCloud>("loop_closure_scan1", 10, false);
   scan2_pub_ = nl.advertise<PointCloud>("loop_closure_scan2", 10, false);
@@ -200,18 +210,18 @@ bool LaserLoopClosure::AddBetweenFactor(
   // Assign output and get ready to go again!
   *key = key_++;
   odometry_ = Pose3::identity();
+
   return true;
 }
 
-bool LaserLoopClosure::AddKeyScanPair(
-    unsigned int key, const LaserLoopClosure::PointCloud& scan) {
+bool LaserLoopClosure::AddKeyScanPair(unsigned int key,
+                                      const PointCloud::ConstPtr& scan) {
   if (keyed_scans_.count(key)) {
     ROS_ERROR("%s: Key %u already has a laser scan.", name_.c_str(), key);
     return false;
   }
 
-  keyed_scans_.insert(
-      std::pair<unsigned int, LaserLoopClosure::PointCloud>(key, scan));
+  keyed_scans_.insert(std::pair<unsigned int, PointCloud::ConstPtr>(key, scan));
   return true;
 }
 
@@ -224,10 +234,13 @@ bool LaserLoopClosure::FindLoopClosures(
   }
   closure_keys->clear();
 
+  // If a loop has already been closed recently, don't try to close a new one.
+  if (std::fabs(key - last_closure_key_) < poses_before_reclosing_)
+    return false;
+
   // Get pose and scan for the provided key.
-  // const gu::Transform3 pose1 = ToGu(values_.at<Pose3>(key-1));
   const gu::Transform3 pose1 = ToGu(values_.at<Pose3>(key));
-  const LaserLoopClosure::PointCloud scan1 = keyed_scans_[key];
+  const PointCloud::ConstPtr scan1 = keyed_scans_[key];
 
   // Iterate through past poses and find those that lie close to the most
   // recently added one.
@@ -252,7 +265,7 @@ bool LaserLoopClosure::FindLoopClosures(
     if (difference.translation.Norm() < proximity_threshold_) {
       // Found a potential loop closure! Perform ICP between the two scans to
       // determine if there really is a loop to close.
-      const LaserLoopClosure::PointCloud scan2 = keyed_scans_[other_key];
+      const PointCloud::ConstPtr scan2 = keyed_scans_[other_key];
 
       gu::Transform3 delta;
       LaserLoopClosure::Mat66 covariance;
@@ -263,6 +276,7 @@ bool LaserLoopClosure::FindLoopClosures(
                                             ToGtsam(covariance)));
         isam_->update(new_factor, Values());
         closed_loop = true;
+        last_closure_key_ = key;
 
         // Store for visualization and output.
         loop_edges_.push_back(std::make_pair(key, other_key));
@@ -273,6 +287,45 @@ bool LaserLoopClosure::FindLoopClosures(
   values_ = isam_->calculateEstimate();
 
   return closed_loop;
+}
+
+void LaserLoopClosure::GetMaximumLikelihoodPoints(PointCloud* points) {
+  if (points == NULL) {
+    ROS_ERROR("%s: Output point cloud container is null.", name_.c_str());
+    return;
+  }
+  points->points.clear();
+
+  // Iterate over poses in the graph, transforming their corresponding laser
+  // scans into world frame and appending them to the output.
+  for (const auto& keyed_pose : values_) {
+    const unsigned int key = keyed_pose.key;
+
+    // The first pose doesn't have a scan.
+    if (key == 1)
+      continue;
+
+    const gu::Transform3 pose = ToGu(values_.at<Pose3>(key));
+    Eigen::Matrix4d b2w;
+    b2w.block(0, 0, 3, 3) = pose.rotation.Eigen();
+    b2w.block(0, 3, 3, 1) = pose.translation.Eigen();
+
+    // Transform the body-frame scan into world frame.
+    PointCloud scan_world;
+    pcl::transformPointCloud(*keyed_scans_[key], scan_world, b2w);
+
+    // Append the world-frame point cloud to the output.
+    *points += scan_world;
+  }
+}
+
+gu::Transform3 LaserLoopClosure::GetLastPose() const {
+  if (key_ > 1) {
+    return ToGu(values_.at<Pose3>(key_-1));
+  } else {
+    ROS_WARN("%s: The graph only contains its initial pose.", name_.c_str());
+    return ToGu(values_.at<Pose3>(0));
+  }
 }
 
 gu::Transform3 LaserLoopClosure::ToGu(const Pose3& pose) const {
@@ -338,8 +391,8 @@ BetweenFactor<Pose3> LaserLoopClosure::MakeBetweenFactor(
   return BetweenFactor<Pose3>(key_-1, key_, delta, covariance);
 }
 
-bool LaserLoopClosure::PerformICP(const LaserLoopClosure::PointCloud& scan1,
-                                  const LaserLoopClosure::PointCloud& scan2,
+bool LaserLoopClosure::PerformICP(const PointCloud::ConstPtr& scan1,
+                                  const PointCloud::ConstPtr& scan2,
                                   const gu::Transform3& pose1,
                                   const gu::Transform3& pose2,
                                   gu::Transform3* delta,
@@ -356,6 +409,13 @@ bool LaserLoopClosure::PerformICP(const LaserLoopClosure::PointCloud& scan1,
   icp.setMaximumIterations(icp_iterations_);
   icp.setRANSACIterations(0);
 
+  // Filter the two scans. They are stored in the pose graph as dense scans for
+  // visualization.
+  PointCloud::Ptr scan1_filtered(new PointCloud);
+  PointCloud::Ptr scan2_filtered(new PointCloud);
+  filter_.Filter(scan1, scan1_filtered);
+  filter_.Filter(scan2, scan2_filtered);
+
   // Set source point cloud. Transform it to pose 2 frame to get a delta.
   const Eigen::Matrix<double, 3, 3> R1 = pose1.rotation.Eigen();
   const Eigen::Matrix<double, 3, 1> t1 = pose1.translation.Eigen();
@@ -369,22 +429,17 @@ bool LaserLoopClosure::PerformICP(const LaserLoopClosure::PointCloud& scan1,
   body2_to_world.block(0, 0, 3, 3) = R2;
   body2_to_world.block(0, 3, 3, 1) = t2;
 
-  gu::Transform3 delta_prior = gu::PoseDelta(pose1, pose2);
-  Eigen::Matrix4d delta_eigen;
-  delta_eigen.block(0, 0, 3, 3) = delta_prior.rotation.Eigen();
-  delta_eigen.block(0, 3, 3, 1) = delta_prior.translation.Eigen();
-
   PointCloud::Ptr source(new PointCloud);
-  pcl::transformPointCloud(scan1, *source, body1_to_world);
+  pcl::transformPointCloud(*scan1_filtered, *source, body1_to_world);
   icp.setInputSource(source);
 
   // Set target point cloud in its own frame.
   PointCloud::Ptr target(new PointCloud);
-  pcl::transformPointCloud(scan2, *target, body2_to_world);
+  pcl::transformPointCloud(*scan2_filtered, *target, body2_to_world);
   icp.setInputTarget(target);
 
   // Perform ICP.
-  LaserLoopClosure::PointCloud unused_result;
+  PointCloud unused_result;
   icp.align(unused_result);
 
   // Get resulting transform.
@@ -407,14 +462,15 @@ bool LaserLoopClosure::PerformICP(const LaserLoopClosure::PointCloud& scan1,
   const gu::Transform3 update =
       gu::PoseUpdate(gu::PoseInverse(pose1),
                      gu::PoseUpdate(gu::PoseInverse(delta_icp), pose1));
-  *delta = gu::PoseUpdate(update, delta_prior);
+
+  *delta = gu::PoseUpdate(update, gu::PoseDelta(pose1, pose2));
 
   // TODO: Use real ICP covariance.
   covariance->Zeros();
   for (int i = 0; i < 3; ++i)
     (*covariance)(i, i) = 0.01;
   for (int i = 3; i < 6; ++i)
-    (*covariance)(i, i) = 0.01;
+    (*covariance)(i, i) = 0.04;
 
   // If the loop closure was a success, publish the two scans.
   source->header.frame_id = fixed_frame_id_;
@@ -435,8 +491,8 @@ void LaserLoopClosure::PublishPoseGraph() const {
     m.id = 0;
     m.action = visualization_msgs::Marker::ADD;
     m.type = visualization_msgs::Marker::LINE_LIST;
-    m.color.r = 0.0;
-    m.color.g = 1.0;
+    m.color.r = 1.0;
+    m.color.g = 0.0;
     m.color.b = 0.0;
     m.color.a = 0.8;
     m.scale.x = 0.02;
@@ -462,9 +518,9 @@ void LaserLoopClosure::PublishPoseGraph() const {
     m.id = 1;
     m.action = visualization_msgs::Marker::ADD;
     m.type = visualization_msgs::Marker::LINE_LIST;
-    m.color.r = 1.0;
-    m.color.g = 0.0;
-    m.color.b = 0.0;
+    m.color.r = 0.0;
+    m.color.g = 0.2;
+    m.color.b = 1.0;
     m.color.a = 0.8;
     m.scale.x = 0.02;
 
@@ -491,7 +547,7 @@ void LaserLoopClosure::PublishPoseGraph() const {
     m.type = visualization_msgs::Marker::SPHERE_LIST;
     m.color.r = 0.3;
     m.color.g = 0.0;
-    m.color.b = 0.8;
+    m.color.b = 1.0;
     m.color.a = 0.8;
     m.scale.x = 0.1;
     m.scale.y = 0.1;
@@ -502,5 +558,25 @@ void LaserLoopClosure::PublishPoseGraph() const {
       m.points.push_back(gr::ToRosPoint(p));
     }
     graph_node_pub_.publish(m);
+  }
+
+  // Draw a sphere around the current sensor frame to show the area in which we
+  // are checking for loop closures.
+  if (closure_area_pub_.getNumSubscribers() > 0) {
+    visualization_msgs::Marker m;
+    m.header.frame_id = base_frame_id_;
+    m.ns = base_frame_id_;
+    m.id = 3;
+    m.action = visualization_msgs::Marker::ADD;
+    m.type = visualization_msgs::Marker::SPHERE;
+    m.color.r = 0.0;
+    m.color.g = 0.4;
+    m.color.b = 0.8;
+    m.color.a = 0.4;
+    m.scale.x = proximity_threshold_ * 2.0;
+    m.scale.y = proximity_threshold_ * 2.0;
+    m.scale.z = proximity_threshold_ * 2.0;
+    m.pose = gr::ToRosPose(gu::Transform3::Identity());
+    closure_area_pub_.publish(m);
   }
 }
