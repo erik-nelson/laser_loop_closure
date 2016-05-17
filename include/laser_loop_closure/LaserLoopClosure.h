@@ -71,9 +71,11 @@ class LaserLoopClosure {
   typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 
   // Call this every time the robot's pose has been updated via ICP or some
-  // other form of odometry. A between factor will only be added as long as the
-  // new pose is significantly different from the most recently added pose to
-  // enforce graph sparsity.
+  // other form of odometry. A between factor will always be added, but this
+  // function will only return true when the new pose is significantly
+  // different from the most recently added pose to enforce graph sparsity.
+  // A return value of true lets the caller know when they should call
+  // AddKeyScanPair().
   bool AddBetweenFactor(const geometry_utils::Transform3& delta,
                         const Mat66& covariance, unsigned int* key);
 
@@ -159,6 +161,7 @@ class LaserLoopClosure {
   ros::Publisher odometry_edge_pub_;
   ros::Publisher loop_edge_pub_;
   ros::Publisher graph_node_pub_;
+  ros::Publisher keyframe_node_pub_;
   ros::Publisher closure_area_pub_;
   ros::Publisher scan1_pub_;
   ros::Publisher scan2_pub_;

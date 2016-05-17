@@ -170,6 +170,8 @@ bool LaserLoopClosure::RegisterCallbacks(const ros::NodeHandle& n) {
       nl.advertise<visualization_msgs::Marker>("loop_edges", 10, false);
   graph_node_pub_ =
       nl.advertise<visualization_msgs::Marker>("graph_nodes", 10, false);
+  keyframe_node_pub_ =
+      nl.advertise<visualization_msgs::Marker>("keyframe_nodes", 10, false);
   closure_area_pub_ =
       nl.advertise<visualization_msgs::Marker>("closure_area", 10, false);
 
@@ -189,19 +191,13 @@ bool LaserLoopClosure::AddBetweenFactor(
 
   // Append the new odometry.
   Pose3 new_odometry = ToGtsam(delta);
-  odometry_ = odometry_.compose(new_odometry);
-
-  // Is the odometry translation large enough to add a new pose to the graph?
-  if (odometry_.translation().norm() < translation_threshold_) {
-    return false;
-  }
 
   NonlinearFactorGraph new_factor;
   Values new_value;
-  new_factor.add(MakeBetweenFactor(odometry_, ToGtsam(covariance)));
+  new_factor.add(MakeBetweenFactor(new_odometry, ToGtsam(covariance)));
 
   Pose3 last_pose = values_.at<Pose3>(key_-1);
-  new_value.insert(key_, last_pose.compose(odometry_));
+  new_value.insert(key_, last_pose.compose(new_odometry));
 
   // Update ISAM2.
   isam_->update(new_factor, new_value);
@@ -209,9 +205,19 @@ bool LaserLoopClosure::AddBetweenFactor(
 
   // Assign output and get ready to go again!
   *key = key_++;
-  odometry_ = Pose3::identity();
 
-  return true;
+  // We always add new poses, but only return true if the pose is far enough
+  // away from the last one (keyframes). This lets the caller know when they
+  // can add a laser scan.
+
+  // Is the odometry translation large enough to add a new keyframe to the graph?
+  odometry_ = odometry_.compose(new_odometry);
+  if (odometry_.translation().norm() > translation_threshold_) {
+    odometry_ = Pose3::identity();
+    return true;
+  }
+
+  return false;
 }
 
 bool LaserLoopClosure::AddKeyScanPair(unsigned int key,
@@ -252,12 +258,12 @@ bool LaserLoopClosure::FindLoopClosures(
     if (other_key == key)
       continue;
 
-    // Don't compare to first pose. It doesn't have an associated scan.
-    if (other_key == 1)
-      continue;
-
     // Don't compare against poses that were recently collected.
     if (std::fabs(key - other_key) < skip_recent_poses_)
+      continue;
+
+    // Don't check for loop closures against poses that are not keyframes.
+    if (!keyed_scans_.count(other_key))
       continue;
 
     const gu::Transform3 pose2 = ToGu(values_.at<Pose3>(other_key));
@@ -301,8 +307,9 @@ void LaserLoopClosure::GetMaximumLikelihoodPoints(PointCloud* points) {
   for (const auto& keyed_pose : values_) {
     const unsigned int key = keyed_pose.key;
 
-    // The first pose doesn't have a scan.
-    if (key == 1)
+    // Check if this pose is a keyframe. If it's not, it won't have a scan
+    // associated to it and we should continue.
+    if (!keyed_scans_.count(key))
       continue;
 
     const gu::Transform3 pose = ToGu(values_.at<Pose3>(key));
@@ -560,13 +567,38 @@ void LaserLoopClosure::PublishPoseGraph() const {
     graph_node_pub_.publish(m);
   }
 
+  // Publish keyframe nodes in the pose graph.
+  if (keyframe_node_pub_.getNumSubscribers() > 0) {
+    visualization_msgs::Marker m;
+    m.header.frame_id = fixed_frame_id_;
+    m.ns = fixed_frame_id_;
+    m.id = 3;
+    m.action = visualization_msgs::Marker::ADD;
+    m.type = visualization_msgs::Marker::SPHERE_LIST;
+    m.color.r = 0.0;
+    m.color.g = 1.0;
+    m.color.b = 0.3;
+    m.color.a = 0.8;
+    m.scale.x = 0.25;
+    m.scale.y = 0.25;
+    m.scale.z = 0.25;
+
+    for (const auto& keyed_pose : values_) {
+      if (keyed_scans_.count(keyed_pose.key)) {
+        gu::Vec3 p = ToGu(values_.at<Pose3>(keyed_pose.key)).translation;
+        m.points.push_back(gr::ToRosPoint(p));
+      }
+    }
+    graph_node_pub_.publish(m);
+  }
+
   // Draw a sphere around the current sensor frame to show the area in which we
   // are checking for loop closures.
   if (closure_area_pub_.getNumSubscribers() > 0) {
     visualization_msgs::Marker m;
     m.header.frame_id = base_frame_id_;
     m.ns = base_frame_id_;
-    m.id = 3;
+    m.id = 4;
     m.action = visualization_msgs::Marker::ADD;
     m.type = visualization_msgs::Marker::SPHERE;
     m.color.r = 0.0;
