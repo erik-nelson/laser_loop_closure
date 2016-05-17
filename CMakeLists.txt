@@ -16,6 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_utils
   parameter_utils
   point_cloud_filter
+  pose_graph_msgs
   visualization_msgs
   pcl_ros
 )
@@ -28,6 +29,7 @@ catkin_package(
     geometry_utils
     parameter_utils
     point_cloud_filter
+    pose_graph_msgs
     visualization_msgs
     pcl_ros
   DEPENDS

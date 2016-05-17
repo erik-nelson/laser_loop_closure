@@ -77,7 +77,8 @@ class LaserLoopClosure {
   // A return value of true lets the caller know when they should call
   // AddKeyScanPair().
   bool AddBetweenFactor(const geometry_utils::Transform3& delta,
-                        const Mat66& covariance, unsigned int* key);
+                        const Mat66& covariance, const ros::Time& stamp,
+                        unsigned int* key);
 
   // Upon successful addition of a new between factor, call this function to
   // associate a laser scan with the new pose.
@@ -96,7 +97,7 @@ class LaserLoopClosure {
   geometry_utils::Transform3 GetLastPose() const;
 
   // Publish pose graph for visualization.
-  void PublishPoseGraph() const;
+  void PublishPoseGraph();
 
  private:
 
@@ -129,8 +130,9 @@ class LaserLoopClosure {
   // Node name.
   std::string name_;
 
-  // Keep a list of keyed laser scans.
+  // Keep a list of keyed laser scans and keyed timestamps.
   std::map<unsigned int, PointCloud::ConstPtr> keyed_scans_;
+  std::map<unsigned int, ros::Time> keyed_stamps_;
 
   // Aggregate odometry until we can update the pose graph.
   gtsam::Pose3 odometry_;
@@ -156,9 +158,11 @@ class LaserLoopClosure {
   std::unique_ptr<gtsam::ISAM2> isam_;
   gtsam::Values values_;
 
-  // Publishers and visualization containers.
+  // Frames.
   std::string fixed_frame_id_;
   std::string base_frame_id_;
+
+  // Visualization publishers.
   ros::Publisher odometry_edge_pub_;
   ros::Publisher loop_edge_pub_;
   ros::Publisher graph_node_pub_;
@@ -166,6 +170,10 @@ class LaserLoopClosure {
   ros::Publisher closure_area_pub_;
   ros::Publisher scan1_pub_;
   ros::Publisher scan2_pub_;
+
+  // Pose graph publishers.
+  ros::Publisher pose_graph_pub_;
+  ros::Publisher keyed_scan_pub_;
 
   typedef std::pair<unsigned int, unsigned int> Edge;
   std::vector<Edge> odometry_edges_;
