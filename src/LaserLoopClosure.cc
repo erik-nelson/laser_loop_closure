@@ -89,6 +89,9 @@ bool LaserLoopClosure::LoadParameters(const ros::NodeHandle& n) {
   if (!pu::Get("frame_id/fixed", fixed_frame_id_)) return false;
   if (!pu::Get("frame_id/base", base_frame_id_)) return false;
 
+  // Should we turn loop closure checking on or off?
+  if (!pu::Get("check_for_loop_closures", check_for_loop_closures_)) return false;
+
   // Load ISAM2 parameters.
   unsigned int relinearize_skip = 1;
   double relinearize_threshold = 0.01;
@@ -233,6 +236,12 @@ bool LaserLoopClosure::AddKeyScanPair(unsigned int key,
 
 bool LaserLoopClosure::FindLoopClosures(
     unsigned int key, std::vector<unsigned int>* closure_keys) {
+
+  // If loop closure checking is off, don't do this step. This will save some
+  // computation time.
+  if (!check_for_loop_closures_)
+    return false;
+
   // Check arguments.
   if (closure_keys == NULL) {
     ROS_ERROR("%s: Output pointer is null.", name_.c_str());

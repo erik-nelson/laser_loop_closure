@@ -136,6 +136,7 @@ class LaserLoopClosure {
   gtsam::Pose3 odometry_;
 
   // Pose graph and ISAM2 parameters.
+  bool check_for_loop_closures_;
   unsigned int key_;
   unsigned int last_closure_key_;
   unsigned int relinearize_interval_;

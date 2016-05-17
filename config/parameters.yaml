@@ -1,3 +1,7 @@
+# Toggle loop closures on or off. Setting this to off will increase run-time
+# speed by a small fraction.
+check_for_loop_closures: false
+
 # Default parameters for the ISAM2 data structure.
 relinearize_skip: 1
 relinearize_threshold: 0.01
