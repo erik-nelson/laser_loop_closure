@@ -38,9 +38,13 @@
 
 #include <geometry_utils/GeometryUtilsROS.h>
 #include <parameter_utils/ParameterUtils.h>
+#include <pose_graph_msgs/KeyedScan.h>
+#include <pose_graph_msgs/PoseGraph.h>
+#include <std_msgs/Empty.h>
 #include <visualization_msgs/Marker.h>
 
 #include <pcl/registration/gicp.h>
+#include <pcl_conversions/pcl_conversions.h>
 
 namespace gu = geometry_utils;
 namespace gr = gu::ros;
@@ -181,12 +185,19 @@ bool LaserLoopClosure::RegisterCallbacks(const ros::NodeHandle& n) {
   scan1_pub_ = nl.advertise<PointCloud>("loop_closure_scan1", 10, false);
   scan2_pub_ = nl.advertise<PointCloud>("loop_closure_scan2", 10, false);
 
+  pose_graph_pub_ =
+      nl.advertise<pose_graph_msgs::PoseGraph>("pose_graph", 10, false);
+  keyed_scan_pub_ =
+      nl.advertise<pose_graph_msgs::KeyedScan>("keyed_scans", 10, false);
+  loop_closure_notifier_pub_ =
+      nl.advertise<std_msgs::Empty>("loop_closure", 10, false);
+
   return true;
 }
 
 bool LaserLoopClosure::AddBetweenFactor(
     const gu::Transform3& delta, const LaserLoopClosure::Mat66& covariance,
-    unsigned int* key) {
+    const ros::Time& stamp, unsigned int* key) {
   if (key == NULL) {
     ROS_ERROR("%s: Output key is null.", name_.c_str());
     return false;
@@ -201,6 +212,9 @@ bool LaserLoopClosure::AddBetweenFactor(
 
   Pose3 last_pose = values_.at<Pose3>(key_-1);
   new_value.insert(key_, last_pose.compose(new_odometry));
+
+  // Store this timestamp so that we can publish the pose graph later.
+  keyed_stamps_.insert(std::pair<unsigned int, ros::Time>(key_, stamp));
 
   // Update ISAM2.
   isam_->update(new_factor, new_value);
@@ -231,6 +245,16 @@ bool LaserLoopClosure::AddKeyScanPair(unsigned int key,
   }
 
   keyed_scans_.insert(std::pair<unsigned int, PointCloud::ConstPtr>(key, scan));
+
+  // Publish the inserted laser scan.
+  if (keyed_scan_pub_.getNumSubscribers() > 0) {
+    pose_graph_msgs::KeyedScan keyed_scan;
+    keyed_scan.key = key;
+
+    pcl::toROSMsg(*scan, keyed_scan.scan);
+    keyed_scan_pub_.publish(keyed_scan);
+  }
+
   return true;
 }
 
@@ -296,6 +320,10 @@ bool LaserLoopClosure::FindLoopClosures(
         // Store for visualization and output.
         loop_edges_.push_back(std::make_pair(key, other_key));
         closure_keys->push_back(other_key);
+
+        // Send an empty message notifying any subscribers that we found a loop
+        // closure.
+        loop_closure_notifier_pub_.publish(std_msgs::Empty());
       }
     }
   }
@@ -497,7 +525,7 @@ bool LaserLoopClosure::PerformICP(const PointCloud::ConstPtr& scan1,
   return true;
 }
 
-void LaserLoopClosure::PublishPoseGraph() const {
+void LaserLoopClosure::PublishPoseGraph() {
 
   // Publish odometry edges.
   if (odometry_edge_pub_.getNumSubscribers() > 0) {
@@ -619,5 +647,48 @@ void LaserLoopClosure::PublishPoseGraph() const {
     m.scale.z = proximity_threshold_ * 2.0;
     m.pose = gr::ToRosPose(gu::Transform3::Identity());
     closure_area_pub_.publish(m);
+  }
+
+  // Construct and send the pose graph.
+  if (pose_graph_pub_.getNumSubscribers() > 0) {
+    pose_graph_msgs::PoseGraph g;
+    g.header.frame_id = fixed_frame_id_;
+
+    for (const auto& keyed_pose : values_) {
+      // Skip the first pose - it doesn't have a timestamp.
+      if (keyed_pose.key == 1)
+        continue;
+
+      gu::Transform3 t = ToGu(values_.at<Pose3>(keyed_pose.key));
+
+      // Populate the message with the pose's data.
+      pose_graph_msgs::PoseGraphNode node;
+      node.key = keyed_pose.key;
+      node.header.frame_id = fixed_frame_id_;
+      node.pose = gr::ToRosPose(t);
+      if (keyed_stamps_.count(keyed_pose.key)) {
+        node.header.stamp = keyed_stamps_[keyed_pose.key];
+      } else {
+        ROS_WARN("%s: Couldn't find timestamp for key %lu", name_.c_str(),
+                 keyed_pose.key);
+      }
+      g.nodes.push_back(node);
+    }
+
+    pose_graph_msgs::PoseGraphEdge edge;
+    for (size_t ii = 0; ii < odometry_edges_.size(); ++ii) {
+      edge.key_from = odometry_edges_[ii].first;
+      edge.key_to = odometry_edges_[ii].second;
+      g.edges.push_back(edge);
+    }
+
+    for (size_t ii = 0; ii < loop_edges_.size(); ++ii) {
+      edge.key_from = loop_edges_[ii].first;
+      edge.key_to = loop_edges_[ii].second;
+      g.edges.push_back(edge);
+    }
+
+    // Publish.
+    pose_graph_pub_.publish(g);
   }
 }
