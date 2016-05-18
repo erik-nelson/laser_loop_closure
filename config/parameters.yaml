@@ -1,6 +1,6 @@
 # Toggle loop closures on or off. Setting this to off will increase run-time
 # speed by a small fraction.
-check_for_loop_closures: false
+check_for_loop_closures: true
 
 # Default parameters for the ISAM2 data structure.
 relinearize_skip: 1
@@ -22,9 +22,9 @@ max_tolerable_fitness: 0.15
 
 # Don't attempt loop closures with poses in the graph that were collected within
 # the last 'skip_recent_poses' poses.
-skip_recent_poses: 20
+skip_recent_poses: 40
 
 # If a loop has recently been closed, don't close a new one for at least this
 # many poses (i.e. the sensor would have to move translation_threshold *
 # poses_before_reclosing meters in order to close a new loop).
-poses_before_reclosing: 20
+poses_before_reclosing: 40
