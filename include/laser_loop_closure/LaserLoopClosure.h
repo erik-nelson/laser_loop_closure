@@ -174,6 +174,7 @@ class LaserLoopClosure {
   // Pose graph publishers.
   ros::Publisher pose_graph_pub_;
   ros::Publisher keyed_scan_pub_;
+  ros::Publisher loop_closure_notifier_pub_;
 
   typedef std::pair<unsigned int, unsigned int> Edge;
   std::vector<Edge> odometry_edges_;

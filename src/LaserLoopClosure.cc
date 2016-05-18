@@ -40,9 +40,11 @@
 #include <parameter_utils/ParameterUtils.h>
 #include <pose_graph_msgs/KeyedScan.h>
 #include <pose_graph_msgs/PoseGraph.h>
+#include <std_msgs/Empty.h>
 #include <visualization_msgs/Marker.h>
 
 #include <pcl/registration/gicp.h>
+#include <pcl_conversions/pcl_conversions.h>
 
 namespace gu = geometry_utils;
 namespace gr = gu::ros;
@@ -187,6 +189,8 @@ bool LaserLoopClosure::RegisterCallbacks(const ros::NodeHandle& n) {
       nl.advertise<pose_graph_msgs::PoseGraph>("pose_graph", 10, false);
   keyed_scan_pub_ =
       nl.advertise<pose_graph_msgs::KeyedScan>("keyed_scans", 10, false);
+  loop_closure_notifier_pub_ =
+      nl.advertise<std_msgs::Empty>("loop_closure", 10, false);
 
   return true;
 }
@@ -241,6 +245,16 @@ bool LaserLoopClosure::AddKeyScanPair(unsigned int key,
   }
 
   keyed_scans_.insert(std::pair<unsigned int, PointCloud::ConstPtr>(key, scan));
+
+  // Publish the inserted laser scan.
+  if (keyed_scan_pub_.getNumSubscribers() > 0) {
+    pose_graph_msgs::KeyedScan keyed_scan;
+    keyed_scan.key = key;
+
+    pcl::toROSMsg(*scan, keyed_scan.scan);
+    keyed_scan_pub_.publish(keyed_scan);
+  }
+
   return true;
 }
 
@@ -306,6 +320,10 @@ bool LaserLoopClosure::FindLoopClosures(
         // Store for visualization and output.
         loop_edges_.push_back(std::make_pair(key, other_key));
         closure_keys->push_back(other_key);
+
+        // Send an empty message notifying any subscribers that we found a loop
+        // closure.
+        loop_closure_notifier_pub_.publish(std_msgs::Empty());
       }
     }
   }
