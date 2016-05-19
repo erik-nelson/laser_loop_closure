@@ -62,7 +62,7 @@ using gtsam::Vector3;
 using gtsam::Vector6;
 
 LaserLoopClosure::LaserLoopClosure()
-    : key_(1), last_closure_key_(std::numeric_limits<int>::min()) {}
+    : key_(0), last_closure_key_(std::numeric_limits<int>::min()) {}
 
 LaserLoopClosure::~LaserLoopClosure() {}
 
@@ -244,6 +244,15 @@ bool LaserLoopClosure::AddKeyScanPair(unsigned int key,
     return false;
   }
 
+  // The first key should be treated differently; we need to use the laser
+  // scan's timestamp for pose zero.
+  if (key == 0) {
+    printf("HERE?!?!?!?");
+    const ros::Time stamp = pcl_conversions::fromPCL(scan->header.stamp);
+    keyed_stamps_.insert(std::pair<unsigned int, ros::Time>(key, stamp));
+  }
+
+  // Add the key and scan.
   keyed_scans_.insert(std::pair<unsigned int, PointCloud::ConstPtr>(key, scan));
 
   // Publish the inserted laser scan.
@@ -655,10 +664,6 @@ void LaserLoopClosure::PublishPoseGraph() {
     g.header.frame_id = fixed_frame_id_;
 
     for (const auto& keyed_pose : values_) {
-      // Skip the first pose - it doesn't have a timestamp.
-      if (keyed_pose.key == 1)
-        continue;
-
       gu::Transform3 t = ToGu(values_.at<Pose3>(keyed_pose.key));
 
       // Populate the message with the pose's data.
