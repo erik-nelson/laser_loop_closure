@@ -247,7 +247,6 @@ bool LaserLoopClosure::AddKeyScanPair(unsigned int key,
   // The first key should be treated differently; we need to use the laser
   // scan's timestamp for pose zero.
   if (key == 0) {
-    printf("HERE?!?!?!?");
     const ros::Time stamp = pcl_conversions::fromPCL(scan->header.stamp);
     keyed_stamps_.insert(std::pair<unsigned int, ros::Time>(key, stamp));
   }
